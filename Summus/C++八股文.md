@@ -88,11 +88,13 @@ auto b = create<std::string>("Temp");  // 传递右值 → 调用移动构造
 
 ## C++的栈容器的内部是什么样的，内存是否连续？
 
-C++的栈stack不是独立容器，是基于其他的序列容器的。默认是使用deque双端队列实现。
+C++的栈stack不是独立容器，是基于其他序列容器的适配器。默认使用deque实现。
 
-- deque内存连续，由多个固定大小内存块组成
-- vector：完全连续，是开辟了一大块大的内存块用于使用
-- list：非连续，双向链表节点分散存储
+**底层容器内存特性**：
+
+- **deque**：分段连续，由多个固定大小内存块组成，通过中控器管理，逻辑连续但物理不连续
+- **vector**：完全连续，单一大块内存
+- **list**：非连续，双向链表节点分散存储
 
 ## shared_ptr引用计数的原理是什么？什么时候增加引用计数，什么时候减少引用计数？
 
@@ -202,12 +204,136 @@ int main() {
 
 ## 右值引用是如何提⾼性能的？
 
-右值引⽤主要是通过避免不必要的拷贝操作来提高代码的性能的。
+右值引用通过**移动语义**和**完美转发**避免不必要的深拷贝，提升性能。
+
+### 核心机制
+
+**1. 移动语义（Move Semantics）**
+- 允许"窃取"临时对象的资源（如堆内存、文件句柄），而非拷贝
+- 通过移动构造函数和移动赋值运算符实现，将源对象资源的所有权转移到目标对象
+- 源对象置为安全的"空状态"（如指针设为nullptr）
+
+**2. 完美转发（Perfect Forwarding）**
+- 使用 `std::forward<T>` 保持参数的值类别（左值/右值）不变
+- 模板函数中配合万能引用 `T&&` 使用，避免额外的拷贝或移动
+
+### 性能提升示例
+
+```c++
+#include <iostream>
+#include <vector>
+using namespace std;
+
+class BigData {
+    int* data;
+    size_t size;
+public:
+    // 构造函数
+    BigData(size_t s) : size(s), data(new int[s]) {
+        cout << "构造：分配 " << size << " 个int" << endl;
+    }
+    
+    // 拷贝构造（深拷贝，性能开销大）
+    BigData(const BigData& other) : size(other.size), data(new int[other.size]) {
+        copy(other.data, other.data + size, data);
+        cout << "拷贝构造：深拷贝 " << size << " 个int" << endl;
+    }
+    
+    // 移动构造（转移所有权，性能高）
+    BigData(BigData&& other) noexcept : size(other.size), data(other.data) {
+        other.data = nullptr;  // 源对象置空
+        other.size = 0;
+        cout << "移动构造：转移资源指针" << endl;
+    }
+    
+    ~BigData() {
+        delete[] data;
+        cout << "析构" << endl;
+    }
+};
+
+int main() {
+    vector<BigData> vec;
+    cout << "=== 使用左值（触发拷贝）===" << endl;
+    BigData obj1(1000000);
+    vec.push_back(obj1);  // 拷贝构造：深拷贝100万个int
+    
+    cout << "\n=== 使用右值（触发移动）===" << endl;
+    vec.push_back(BigData(1000000));  // 移动构造：仅转移指针
+    // 或使用 vec.push_back(std::move(obj1));
+    
+    return 0;
+}
+```
+
+**输出分析**：
+- 拷贝：需要分配新内存并复制100万个int（几MB数据）
+- 移动：只转移8字节的指针，性能提升数百倍
+
+### 实际应用场景
+
+1. **STL容器操作**：`push_back(std::move(obj))` 避免拷贝大对象
+2. **返回局部对象**：编译器自动启用移动语义（配合RVO）
+3. **智能指针转移**：`unique_ptr` 只能移动不能拷贝
+4. **交换操作**：`std::swap` 内部使用移动而非三次拷贝
 
 ## 介绍⼀下RVO？
 
-RVO（ReturnValueOptimization）是⼀种编译器优化技术，用于消除不必要的临时对象拷贝，提高代码的性能。RVO主要针对函数返回局部对象的情况，通过优化，可以避免创建临时对象并执行拷贝构造函数。
-RVO的**基本思想**是：在函数调用栈上直接构造返回值，而不是先构造⼀个局部对象，然后再拷贝到调用者的栈空间。这样可以减少临时对象的创建和销毁，提高代码的运行效率。
+RVO（Return Value Optimization）是编译器优化技术，在返回对象时直接在调用者的内存位置构造，消除拷贝/移动操作。
+
+### 两种形式
+
+**1. RVO（纯RVO）**
+- 返回无名临时对象
+
+```c++
+MyClass createObject() {
+    return MyClass();  // 直接返回临时对象，触发RVO
+}
+```
+
+**2. NRVO（Named RVO）**
+- 返回具名局部对象
+
+```c++
+MyClass createObject() {
+    MyClass obj;  // 局部对象
+    // ... 一些操作
+    return obj;  // 返回具名对象，可能NRVO
+}
+```
+
+### 优化效果对比
+
+```c++
+#include <iostream>
+using namespace std;
+
+class MyClass {
+public:
+    MyClass() { cout << "构造" << endl; }
+    MyClass(const MyClass&) { cout << "拷贝构造" << endl; }
+    MyClass(MyClass&&) noexcept { cout << "移动构造" << endl; }
+};
+
+MyClass createObject() {
+    return MyClass();  // RVO：只调用一次构造
+}
+
+int main() {
+    MyClass obj = createObject();  
+    // 输出：构造（仅一次，无拷贝/移动）
+    return 0;
+}
+```
+
+**没有RVO的情况**：需要执行构造 → 移动构造（或拷贝构造）→ 析构
+
+### 关键要点
+
+- **C++17强制要求**：纯RVO从可选优化变为强制优化
+- **NRVO不保证**：编译器可能因多个return路径而放弃优化
+- **与移动语义关系**：RVO优先级高于移动，不要手动`std::move`返回值（会阻止RVO）
 
 ## 如果一个class的this指针被删除后强行访问会有什么影响？
 
@@ -382,9 +508,9 @@ class Derived : public Base {
 
 ## C++类型推导的作用和用法？
 
-C++作为一种强类型语言，类型匹配比较麻烦，所以借助编译器来处理类型推导比较好，提升编码效率。
-**auto**：用于变量的类型的推导，初始化一个值然后去推导变量的类型。如果是使用auto定义多个变量，多个变量必须是同一类型。类型推导会丢失引用和cv语义，可以使用auto&保留，万能引用auto&&,会根据初始值属性判断是左值还是右值引用。常见于lambda表达式。
-**decltype**:推导表达式的类型（保留所有信息)
+**auto**：变量类型推导。会丢失引用和cv语义，用`auto&`保留。万能引用`auto&&`根据初始值推导左/右值引用。
+
+**decltype**：推导表达式类型，保留所有信息（引用、cv限定符）。
 
 ```c++
 int a = 10;
@@ -394,11 +520,46 @@ decltype(a + 3.14) c;   // c 为 double[5]
 
 ## function,lambda,bind之间的关系？
 
-​Lambda 和 std::bind 是生产者，生成可调用的对象。function是消费者，管理各类对象并提供一致的调用接口。
+关系总结：lambda和bind生成可调用对象，function包装它们提供统一接口。
 
-- function：通用可调用对象的包装器，支持类型擦除，统一存储 Lambda、std::bind 结果等。依赖其他可调用对象作为其内容。
-- lambda：生成匿名函数对象（闭包），可捕获外部变量，提供简洁的语法定义临时函数。可独立使用，或作为 std::function/std::bind 的输入。优点是直接内联，系统开销小。
-- bind：绑定函数的部分参数，生成新的可调用对象，支持参数重排和占位符机制。常常绑定普通函数、成员函数或 Lambda。
+各自**特点**：
+
+- **lambda**：匿名函数对象，可捕获外部变量，直接内联开销小
+- **bind**：绑定函数参数，生成新可调用对象，支持参数重排
+- **function**：通用包装器，类型擦除，统一存储各种可调用对象
+
+配合使用示例：
+
+```c++
+#include <functional>
+#include <iostream>
+using namespace std;
+
+void print(int a, int b) {
+    cout << a + b << endl;
+}
+
+int main() {
+    // lambda -> function
+    function<int(int, int)> f1 = [](int a, int b) { return a + b; };
+    cout << f1(1, 2) << endl;  // 3
+    
+    // bind -> function
+    function<void(int)> f2 = bind(print, placeholders::_1, 10);
+    f2(5);  // 15
+    
+    // 直接使用lambda（无类型擦除，性能更好）
+    auto f3 = [](int a, int b) { return a * b; };
+    cout << f3(3, 4) << endl;  // 12
+    
+    return 0;
+}
+```
+
+**选择建议**：
+- 优先用lambda（简洁、高效）
+- 需要统一类型存储时用function
+- bind已被lambda替代，不推荐新代码使用
 
 ## 继承下的构造函数和析构函数执行顺序？
 
@@ -448,16 +609,9 @@ C++11主要特性：
 
 ## 右值引用和左值引用的区别？
 
-**左值引用**的作用​：
+**左值引用**：避免拷贝、修改原对象、延长临时对象生命周期（const T&）。
 
-- ​减少拷贝​：作为函数参数或返回值时避免数据复制。
-- ​修改原对象​：通过引用直接操作原始数据。
-- ​生命周期管理​：const T& 可延长临时对象的生命周期至引用作用域结束。
-
-**右值引用**的作用：
-
-- 通过“窃取”临时对象的资源（如堆内存），避免深拷贝。
-- 完美转发：在模板中保持参数的原始值类别（左值/右值），通过forward转发。
+**右值引用**：窃取临时对象资源避免深拷贝、完美转发保持值类别。
 
 ```c++
 template<typename T>
@@ -477,7 +631,7 @@ void wrapper(T&& arg) {
 
 ## C++类型推导为什么会有额外的开销？
 
-C++的类型推导之所以会有额外的开销，是因为以下几个原因：
+C++的类型推导有额外开销的原因：
 
 - 1.推导规则复杂：auto会忽略初始化表达式的顶层const、引用和数组退化。需编译器多步分析。decltype的值类别敏感，需根据表达式是变量、函数调用或带括号的左值，分别应用不同规则推导。
 - 2.模板实例化负担：在模板中使用auto或decltype推导返回值时，可能触发多次模板实例化。
@@ -493,87 +647,96 @@ C++链接到动态库的过程：
 
 ## vector与普通数组的区别？vector扩容如何影响复杂度？
 
-vector和数组的区别在于：vector是动态大小，能够自动管理堆内存，有边界检查，并提供了一些功能接口。vector扩容时会将老的元素复制到新开辟的内存空间中，频繁扩容会导致性能下滑。
+**主要区别**：
+
+| 特性 | vector | 数组 |
+|------|--------|------|
+| **大小** | 动态，可自动扩容 | 静态，编译时确定 |
+| **内存管理** | 自动管理堆内存 | 栈上分配或手动管理堆 |
+| **边界检查** | `at()`有边界检查 | 无边界检查 |
+| **功能接口** | 丰富（push_back/size/clear等） | 仅基础操作 |
+| **传递方式** | 值语义，可拷贝/移动 | 退化为指针 |
+
+**vector扩容机制与复杂度影响**：
+
+**1. 扩容过程**：
+- 容量不足时，分配更大内存（通常是1.5倍或2倍）
+- 将原有元素**移动或拷贝**到新内存
+- 释放旧内存
+
+**2. 复杂度分析**：
+```c++
+vector<int> vec;
+for (int i = 0; i < n; ++i) {
+    vec.push_back(i);  // 平摊O(1)，最坏O(n)
+}
+```
+
+- **单次push_back**：
+  - 无需扩容：O(1)
+  - 需要扩容：O(n)（拷贝n个元素）
+  
+- **摘销分析**：虽然单次扩容是O(n)，但因为扩容频率低（每次增加2倍），平摊O(1)
+
+**3. 性能优化建议**：
+```c++
+// 预先分配空间，避免多次扩容
+vec.reserve(1000);  // 预留容量
+
+// 或直接指定初始大小
+vector<int> vec(1000);  // 初始化1000个元素
+```
+
+**4. 频繁扩容的影响**：
+- 内存分配/释放开销
+- 元素拷贝/移动开销
+- 迭代器失效（扩容后所有迭代器、指针、引用均失效）
 
 ## 进程同步的技术有哪些？
 
-进程同步技术主要用于协调多个进程对共享资源的访问，避免竞态条件（Race Condition）和数据不一致问题。
-
-- 互斥锁：通过锁定机制确保同一时刻只有一个进程能访问临界区资源。适用于简单共享资源的**独占访问**。
+**1. 互斥锁**：同一时刻只有一个进程访问临界区
 
 ```c++
 std::mutex mtx;
-void critical_section() {
-    std::lock_guard<std::mutex> lock(mtx); // 自动加锁
-    // 访问共享资源
-} // 自动解锁
+std::lock_guard<std::mutex> lock(mtx);  // RAII自动加锁/解锁
 ```
 
-- ​信号量：通过计数器控制**多个进程**对共享资源的访问权限。适用于资源池的管理。
+**2. 信号量**：计数器控制多进程访问权限
 
 ```c++
-#include <semaphore>
-std::counting_semaphore<10> sem(3); // 允许3个进程同时访问
-void access_resource() {
-    sem.acquire(); // 获取信号量
-    // 使用资源
-    sem.release(); // 释放信号量
-}
+std::counting_semaphore<10> sem(3);  // 允许3个并发
+sem.acquire();  // 获取
+sem.release();  // 释放
 ```
 
-- 条件变量：允许进程等待特定条件成立后再继续执行，需与互斥锁配合使用。通过wait()释放锁并阻塞，通过notify_one()或notify_all()唤醒等待进程。
+**3. 条件变量**：等待特定条件成立
 
 ```c++
-std::mutex mtx;
 std::condition_variable cv;
-bool data_ready = false;
-
-void consumer() {
-    std::unique_lock<std::mutex> lock(mtx);
-    cv.wait(lock, []{ return data_ready; }); // 等待条件满足
-    // 消费数据
-}
+cv.wait(lock, []{ return data_ready; });  // 等待
+cv.notify_one();  // 唤醒
 ```
 
-- 屏障：强制多个进程在指定同步点等待，直到所有进程到达后才继续执行。主要适用于并行计算中分阶段任务等场景。
+**4. 屏障**：多进程同步点等待
 
 ```c++
-#include <barrier>
-std::barrier sync_point(5); // 等待5个进程
-
-void worker() {
-    // 阶段1任务
-    sync_point.arrive_and_wait(); // 同步点
-    // 阶段2任务
-}
+std::barrier sync_point(5);  // 等5个进程
+sync_point.arrive_and_wait();  // 同步
 ```
 
-- 原子操作：通过硬件指令保证对单个变量的操作不可分割，避免数据竞争。主要适用于高频计数器、无锁数据结构等场景。
+**5. 原子操作**：不可分割的变量操作
 
 ```c++
-#include <atomic>
 std::atomic<int> counter(0);
-
-void increment() {
-    counter.fetch_add(1, std::memory_order_relaxed);
-}
+counter.fetch_add(1, std::memory_order_relaxed);
 ```
 
-- 读写锁：允许多个进程同时读取共享资源，但**写入时需独占访问**。适用于读多写少的共享数据（如配置信息）。
+**6. 读写锁**：多读单写
 
 ```c++
-#include <shared_mutex>
 std::shared_mutex rw_mutex;
-
-void read_data() {
-    std::shared_lock lock(rw_mutex); // 共享锁（可并发读）
-    // 读取数据
-}
-
-void write_data() {
-    std::unique_lock lock(rw_mutex); // 独占锁（互斥写）
-    // 写入数据
-}
+std::shared_lock lock(rw_mutex);  // 读锁（并发）
+std::unique_lock lock(rw_mutex);  // 写锁（独占）
 ```
 
 ## malloc和new的具体实现？
@@ -704,25 +867,145 @@ std::unique_ptr<int> p3 = std::unique_ptr<int>(new int(10)); // 合法
 
 ## 移动语义如何使用？
 
-移动语义是C++11引入的核心特性，通过转移资源所有权而非复制资源，显著提升程序性能。绑定临时对象（右值），标记可被“窃取”资源的对象。使用move将左值强制转换为右值引用，触发移动语义。需定义移动构造函数和移动赋值运算符，并标记noexcept以保证异常安全。
+移动语义通过转移资源所有权而非复制资源，显著提升程序性能。
+
+### 使用方式
+
+**1. 自动触发**
+- 使用临时对象（右值）时编译器自动调用移动构造/移动赋值
+
+```c++
+std::string s = "Hello";  // 普通构造
+std::string s2 = std::string("World");  // 移动构造（临时对象）
+```
+
+**2. 显式调用 std::move**
+- 将左值强制转换为右值引用，触发移动语义
+- **注意**：移动后源对象处于有效但未指定状态，不应再使用
 
 ```c++
 std::string s1 = "Hello";
-std::string s2 = std::move(s1);  // s1的资源被转移给s2，s1变为空
+std::string s2 = std::move(s1);  // s1资源转移给s2，s1变空
+// s1不应再访问
 ```
+
+**3. 实现移动构造/赋值函数**
+
+```c++
+class MyString {
+    char* data;
+public:
+    // 移动构造函数
+    MyString(MyString&& other) noexcept 
+        : data(other.data) {
+        other.data = nullptr;  // 源对象置空
+    }
+    
+    // 移动赋值运算符
+    MyString& operator=(MyString&& other) noexcept {
+        if (this != &other) {
+            delete[] data;  // 释放自身资源
+            data = other.data;  // 窃取资源
+            other.data = nullptr;
+        }
+        return *this;
+    }
+};
+```
+
+### 关键要点
+
+- **noexcept 声明**：保证异常安全，STL容器优先使用noexcept的移动操作
+- **资源所有权转移**：源对象必须置为安全可析构的状态
+- **常见场景**：容器操作、函数返回、智能指针转移
 
 ## emplace_back和push_back的区别？
 
-两者均为容器尾部添加元素的方法，但**底层机制**和**适用场景**不同。
+**底层机制对比**：
 
-- push_back:先构造临时对象，再拷贝/移动到容器中.
-- emplace_back:​直接在容器内存中构造对象，避免临时对象创建和拷贝/移动。减少了构造临时对象这一步，性能更优。不支持初始化列表，存在隐式类型转换风险。
-结论：emplace_back的效率相对更高，因此在代码中**尽量用emplace_back**代替push_back。
+- **push_back**：先构造临时对象 → 拷贝/移动到容器 → 销毁临时对象
+- **emplace_back**：直接在容器内存中原地构造，无中间临时对象
+
+**选择建议**：
+
+使用emplace_back：
+- 构造复杂对象（多个参数）
+- 性能关键场景
+- 确保参数类型安全
+
+使用push_back：
+- 已有对象实例
+- 需要初始化列表：`vec.push_back({1, 2, 3})`
+- 代码可读性更重要
 
 ## deque和vector的区别？内存布局有啥区别？
 
-- deque:​分段连续存储，由多个固定大小的内存块（chunks）组成，通过中控器（指针数组）管理逻辑连续性。动态分配新内存块，只需更新中控器的指针，​无需移动现有元素。扩容成本更低。无法保证整体内存连续。需高频头尾操作时使用queue。
-- vector:​单块连续内存，元素**物理地址连续**,容量不足时，重新分配一块更大的连续内存,严格连续，支持直接传递首地址。操作集中在尾部。
+**对比总览**：
+
+| 特性 | deque | vector |
+|------|-------|--------|
+| **内存布局** | 分段连续，逻辑连续物理不连续 | 单块连续，严格连续 |
+| **扩容机制** | 分配新内存块，更新中控器 | 重新分配，拷贝所有元素 |
+| **扩容成本** | O(1)，无需移动元素 | O(n)，需拷贝所有元素 |
+| **随机访问** | O(1)，但需两次寄存器计算 | O(1)，直接地址偏移 |
+| **头部插入** | O(1) | O(n) |
+| **尾部插入** | O(1) | 平摊O(1) |
+| **迭代器失效** | 只影响特定块 | 扩容时全部失效 |
+
+**内存布局详解**：
+
+**deque的分段存储**：
+```
+中控器（map）
+[ptr0] -> [块0: elem0, elem1, ..., elemN]
+[ptr1] -> [块1: elemN+1, ..., elem2N]
+[ptr2] -> [块2: elem2N+1, ..., elem3N]
+...
+```
+- 由多个固定大小内存块（通常512字节）组成
+- 中控器（指针数组）管理这些块
+- 每个块内部连续，块之间不连续
+
+**vector的连续存储**：
+```
+[元素<-1]首地址 -> [elem0][elem1][elem2]...[elemN] <- 尾地址
+│                                                      │
+└──────────单一连续内存块────────────┘
+```
+- 所有元素在一块连续内存中
+- 支持直接传递首地址给C API
+
+**性能对比示例**：
+
+```c++
+#include <deque>
+#include <vector>
+#include <chrono>
+
+// 头部插入测试
+deque<int> dq;
+for (int i = 0; i < 10000; ++i) {
+    dq.push_front(i);  // O(1)
+}
+
+vector<int> vec;
+for (int i = 0; i < 10000; ++i) {
+    vec.insert(vec.begin(), i);  // O(n) - 慢很多！
+}
+```
+
+**适用场景**：
+
+- **deque**：
+  - 需要高频头尾操作（队列/双端队列）
+  - 不需要内存严格连续
+  - 避免频繁扩容的拷贝开销
+  
+- **vector**：
+  - 只在尾部操作
+  - 需要与C API交互（传递首地址）
+  - 需要最优随机访问性能
+  - 内存局部性要求高
 
 ## weak_ptr如何解决循环引用？
 
@@ -790,80 +1073,51 @@ int main()
 
 ## C++17的新特性？
 
-- 结构化绑定：允许通过一个简单的声明将元组或其他数据结构的成员绑定到变量。
-- if初始化：在 if 和 switch 语句中可以直接初始化变量。
+- **结构化绑定**：元组/结构体成员绑定到变量
 
 ```c++
-int num4 = 100;
-    if (int a = 1 < num4)//C++17支持if初始化
-    {
-        cout << "C++17 yes" << endl;
-    }
-    return 0;
+auto [x, y] = std::make_pair(1, 2);  // x=1, y=2
 ```
 
-- 折叠表达式：支持更灵活的模板元编程
-- constexpr lambda 表达式：允许 lambda 表达式在编译时进行求值。
+- **if初始化**：if/switch语句中直接初始化变量
 
 ```c++
-int main() {
-    // 定义一个 constexpr lambda 表达式，用于计算两个整数的和
-    constexpr auto add = [](int x, int y) constexpr {
-        return x + y;
-    };
-
-    // 在编译时调用 lambda 表达式
-    constexpr int result = add(3, 4);
-
-    // 输出结果
-    std::cout << "Result: " << result << std::endl;
-
-    return 0;
+if (int a = getValue(); a > 0) {
+    // 使用a
 }
 ```
 
-- std::optional：提供了一种可选值的容器，用于解决空指针的问题。
+- **折叠表达式**：简化可变参数模板
 
 ```c++
-// 一个可能返回无效值的函数，使用 optional 来安全地表示结果
-optional<int> divide(int numerator, int denominator)
-{
-    if (denominator == 0)
-    {
-        return nullopt; // 返回无值状态
-    }
-    return numerator / denominator;
-}
-
-int main()
-{
-    auto result1 = divide(10, 2);
-    if (result1.has_value())
-    {
-        cout << "Result of 10 / 2: " << result1.value() << endl;
-    }
-    else
-    {
-        cout << "Division by zero error." << endl;
-    }
-
-    auto result2 = divide(5, 0); // 除以零，应该失败
-    if (result2)
-    {
-        // 另一种检查方式
-        cout << "Result of 5 / 0: " << *result2 << endl;
-    }
-    else
-    {
-        cout << "Division by zero error." << endl;
-    }
-
-    return 0;
+template<typename... Args>
+auto sum(Args... args) {
+    return (args + ...);  // 展开为 arg1 + arg2 + arg3...
 }
 ```
 
-- std::variant：提供了一种可变的类型安全的联合。
-- filesystem：提供了一个现代化的、面向对象的文件系统操作 API。
+- **constexpr lambda**：编译时求值的lambda
+
+```c++
+constexpr auto add = [](int x, int y) { return x + y; };
+constexpr int result = add(3, 4);  // 编译时计算
+```
+
+- **std::optional**：安全表示可能无值的对象
+
+```c++
+std::optional<int> divide(int a, int b) {
+    if (b == 0) return std::nullopt;
+    return a / b;
+}
+
+if (auto result = divide(10, 2)) {
+    std::cout << *result;  // 5
+}
+```
+
+- **std::variant**：类型安全的联合体
+- **std::filesystem**：现代化文件系统API
 
 ## 如何让对象只能产生在堆上？
 
@@ -1251,11 +1505,11 @@ int main() {
 
 ## SFINAE是什么？
 
-SFINAE是 C++ 模板编程中的核心机制，用于在编译期根据类型特性选择或禁用特定的模板重载。其核心思想是：​当模板参数替换导致无效代码时，编译器不会报错，而是静默忽略该模板候选，继续**尝试其他匹配的重载版本**。
+SFINAE（Substitution Failure Is Not An Error）：模板参数替换失败时，编译器不报错，而是忽略该模板候选，尝试其他重载。
 
-适应场景：
+**应用场景**：
 
-- ​条件启用模板函数
+**1. 条件启用模板**
 
 ```c++
 template <typename T>
@@ -1267,7 +1521,7 @@ typename std::enable_if<std::is_floating_point<T>::value, void>::type
 process(T val) { /* 处理浮点型 */ }
 ```
 
-- 检测类型成员或方法:结合 decltype 和 std::void_t 检查类型是否支持特定操作
+**2. 检测类型成员**
 
 ```c++
 template <typename, typename = void>
@@ -1278,12 +1532,13 @@ struct has_serialize<T, std::void_t<decltype(std::declval<T>().serialize())>>
     : std::true_type {};
 ```
 
-- 重载决策优化:在多个模板重载中，SFINAE 帮助编译器选择最匹配的版本，避免歧义。
+**3. 重载决策**
 
-```C++
-void process(double val);  // 普通函数
-template <typename T>     // 模板函数
-void process(T val);
+```c++
+void process(double val);  // 普通函数优先
+template <typename T>
+void process(T val);       // 模板备选
+```
 ```
 
 ## C++中Static全局变量，全局变量，和extern变量的区别
@@ -1580,12 +1835,67 @@ int main() {
 
 ## C++中的原子变量？
 
-原子变量是C++11引入的核心多线程同步工具，用于实现无锁线程安全操作，避免数据竞争并优化性能。
-原子操作意味着一个操作要么未开始，要么已经完成，不会有处于中间状态的情况。
-原子变量通过内存序参数解决编译器和CPU乱序执行问题，确保多线程环境下操作的可见性和顺序一致性。
-原子变量的**底层实现原理**：
+原子变量（`std::atomic`）是C++11引入的无锁线程安全工具，保证操作不可分割，避免数据竞争。
 
-- X86架构：使用lock前缀指令（如lock add）锁定总线，阻止其他核心访问内存，确保操作独占执行。
-- ARM架构：通过LDREX/STREX指令实现乐观锁
+**核心特性**：
+- **原子性**：操作要么未开始，要么已完成，无中间状态
+- **内存序**：控制编译器/CPU乱序执行，保证可见性
 
-原子变量的适用场景：计数器、标志位等轻量同步场景，提升并发效率，但是复杂场景下仍然需要借助互斥锁等工具。
+**基本用法**：
+
+```c++
+#include <atomic>
+#include <thread>
+
+std::atomic<int> counter(0);
+
+void increment() {
+    for (int i = 0; i < 1000; ++i) {
+        counter.fetch_add(1);  // 原子自增
+    }
+}
+
+int main() {
+    std::thread t1(increment);
+    std::thread t2(increment);
+    t1.join();
+    t2.join();
+    std::cout << counter.load() << std::endl;  // 2000
+}
+```
+
+**常用操作**：
+
+```c++
+std::atomic<int> val(10);
+
+val.store(20);              // 原子写
+int x = val.load();         // 原子读
+val.fetch_add(5);           // 原子加
+val.exchange(30);           // 原子交换
+
+// CAS（Compare-And-Swap）
+int expected = 30;
+val.compare_exchange_strong(expected, 40);  // 如果val==30，设为40
+```
+
+**内存序参数**：
+
+| 内存序 | 使用场景 |
+|---------|----------|
+| `memory_order_relaxed` | 无同步要求，仅保证原子性 |
+| `memory_order_acquire` | 读操作，后续读写不可重排到此之前 |
+| `memory_order_release` | 写操作，之前读写不可重排到此之后 |
+| `memory_order_seq_cst` | 顺序一致（默认），最强同步 |
+
+**底层实现**：
+
+- **x86**：`lock` 前缀指令（`lock add`），锁定总线/缓存行
+- **ARM**：LL/SC指令对（`LDREX`/`STREX`），加载链接/存储条件
+
+**适用场景**：
+- 计数器、标志位
+- 无锁队列/栈
+- 双检锁定单例
+
+**注意**：复杂场景（多变量同步）仍需互斥锁。

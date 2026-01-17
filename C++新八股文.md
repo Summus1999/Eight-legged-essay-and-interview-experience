@@ -257,6 +257,14 @@ explicit 关键字在 C++ 中用于禁止**编译器进行隐式类型转换**�
 
 - 出现悬空引用：引用绑定到临时对象或已被销毁的对象，然后对象被销毁后会出现悬空的情况
 
+#### C++深拷贝和浅拷贝的区别？
+
+深拷贝和 浅拷贝是对象复制的两种核心机制，主要区别在于对**动态资源**（如堆内存）的处理方式。
+
+- 浅拷贝：仅复制对象的成员变量值，多个对象共享同一块动态内存，易导致悬垂指针、双重释放的问题，性能开销小。
+
+- 深拷贝：复制成员变量值，并为指针指向的资源分配新内存，复制内容。但是需手动实现拷贝构造函数和赋值运算符重载。优点是**资源独立，无共享风险**。
+
 ## modern C++特性
 
 ### C++11
@@ -281,13 +289,517 @@ Tips: `auto_ptr` 已在 C++11 中废弃, C++17 中移除。
 
 **引用计数减少**：对象析构（离开作用域）、reset()、重新赋值时。
 
+#### 右值引用是如何提高性能的？
+
+右值引用通过**移动语义**和**完美转发**避免不必要的深拷贝，提升性能。
+
+**核心机制**
+
+**1. 移动语义（Move Semantics）**
+
+- 允许"窃取"临时对象的资源（如堆内存、文件句柄），而非拷贝
+- 通过移动构造函数和移动赋值运算符实现，将源对象资源的所有权转移到目标对象
+- 源对象置为安全的"空状态"（如指针设为nullptr）
+
+**2. 完美转发（Perfect Forwarding）**
+
+- 使用 `std::forward<T>` 保持参数的值类别（左值/右值）不变
+- 模板函数中配合万能引用 `T&&` 使用，避免额外的拷贝或移动
+
+#### **右值引用和左值引用的区别？**
+
+**左值引用***：避免拷贝、修改原对象、延长临时对象生命周期（const T&）。
+
+**右值引用*：窃取临时对象资源避免深拷贝、完美转发保持值类别。
+
+#### 移动语义如何使用？
+
+**1. 自动触发**
+
+- 使用临时对象（右值）时编译器自动调用移动构造/移动赋值
+
+```c++
+std::string s = "Hello";  // 普通构造
+std::string s2 = std::string("World");  // 移动构造（临时对象）
+```
+
+**2. 显式调用 std::move**
+
+- 将左值强制转换为右值引用，触发移动语义
+- **注意**：移动后源对象处于有效但未指定状态，不应再使用
+
+```c++
+std::string s1 = "Hello";
+std::string s2 = std::move(s1);  // s1资源转移给s2，s1变空
+// s1不应再访问
+```
+
+**3. 实现移动构造/赋值函数**
+
+```c++
+class MyString {
+    char* data;
+public:
+    // 移动构造函数
+    MyString(MyString&& other) noexcept 
+        : data(other.data) {
+        other.data = nullptr;  // 源对象置空
+    }
+    
+    // 移动赋值运算符
+    MyString& operator=(MyString&& other) noexcept {
+        if (this != &other) {
+            delete[] data;  // 释放自身资源
+            data = other.data;  // 窃取资源
+            other.data = nullptr;
+        }
+        return *this;
+    }
+};
+```
+
+关键要点：
+
+- **noexcept 声明**：保证异常安全，STL容器优先使用noexcept的移动操作
+- **资源所有权转移**：源对象必须置为安全可析构的状态
+- **常见场景**：容器操作、函数返回、智能指针转移
+
+#### 完美转发？
+
+完美转发是 C++11 引入的核心特性，用于在函数模板中无损传递参数的原始值类别（左值/右值）和常量性，避免不必要的拷贝并正确触发移动语义。
+
+- 通用引用：统一接收任意类型的参数
+
+- 引用折叠规则：编译器根据传入参数的类型自动应用折叠规则
+
+- forward语义还原：恢复参数的原始值类别。
+
+#### C++类型推导的作用和用法？
+
+**auto**:变量类型推导。会丢失引用和cv语义，用`auto&`保留。万能引用`auto&&`根据初始值推导左/右值引用。
+
+**decltype**：推导表达式类型，保留所有信息（引用、cv限定符）。
+
+```c++
+int a = 10;
+decltype(a) b = 20;     // b 为 int
+decltype(a + 3.14) c;   // c 为 double[5]
+```
+
+#### C++类型推导为什么会有额外的开销？
+
+C++的类型推导有额外开销的原因：
+
+- 1.推导规则复杂：auto会忽略初始化表达式的顶层const、引用和数组退化。需编译器多步分析。decltype的值类别敏感，需根据表达式是变量、函数调用或带括号的左值，分别应用不同规则推导。
+- 2.模板实例化负担：在模板中使用auto或decltype推导返回值时，可能触发多次模板实例化。
+- 3.意外的值拷贝:若初始化表达式返回引用，但auto未显式声明引用，会进行值拷贝。
+
+#### 使用lambda表达式，捕获局部变量时的规则？
+
+Lambada表达式的捕获规则主要有：值捕获，引用捕获，隐式捕获和显示捕获。
+
+- 值捕获：使用值捕获时，lambda 表达式会复制外部作用域的局部变量，并在lambda 表达式内部使用它们的副本。这意味着捕获的变量在 lambda 表达式创建时就被复制，lambda 表达式内部的操作不会影响原始变量的值。
+- 引用捕获：使用引用捕获时，lambda 表达式会获取外部作用域的局部变量的引用。这意味着lambda表达式内部对变量的操作会影响到原始变量。
+- 隐式捕获：通过在捕获列表中使用 = 或 & 符号，可以实现隐式捕获。使用= 捕获外部作用域的所有变量的副本，而使用 & 捕获所有变量的引用。
+- 显式捕获：在捕获列表中，可以指定要捕获的特定变量，并且可以同时使用值捕获和引用捕获。
+
+#### function,lambda,bind之间的关系？
+
+关系总结：lambda和bind生成可调用对象，function包装它们提供统一接口。
+
+各自**特点**：
+
+- **lambda**：匿名函数对象，可捕获外部变量，直接内联开销小
+- **bind**：绑定函数参数，生成新可调用对象，支持参数重排
+- **function**：通用包装器，类型擦除，统一存储各种可调用对象
+
+配合使用示例：
+
+```c++
+#include <functional>
+#include <iostream>
+using namespace std;
+
+void print(int a, int b) {
+    cout << a + b << endl;
+}
+
+int main() {
+    // lambda -> function
+    function<int(int, int)> f1 = [](int a, int b) { return a + b; };
+    cout << f1(1, 2) << endl;  // 3
+    
+    // bind -> function
+    function<void(int)> f2 = bind(print, placeholders::_1, 10);
+    f2(5);  // 15
+    
+    // 直接使用lambda（无类型擦除，性能更好）
+    auto f3 = [](int a, int b) { return a * b; };
+    cout << f3(3, 4) << endl;  // 12
+    
+    return 0;
+}
+```
+
+**选择建议**：
+
+- 优先用lambda（简洁、高效）
+- 需要统一类型存储时用function
+- bind已被lambda替代，不推荐新代码使用
+
+#### C++函数封装器为什么优于函数指针？
+
+函数封装器的**优点**：
+
+- 函数封装器兼容函数指针，lambda表达式和仿函数，代码更加简洁、清晰且利于拓展。
+- 函数封装器类型安全，有严格的类型检查。
+- 与现代C++特性的深度集成
+- 面向对象支持
+
 ### C++14
+
+#### C++14的新特性？
+
+C++14主要是对一些C++11的已有特性做了扩展。
+
+- 支持更灵活的类型推导，C++14支持decltype(auto),这个auto仅仅作为占位符使用。
+- constexpr支持更加广泛的语法和应用，如可以使用局部变量。
+- 支持更加通用的lambda表达式，允许表达式内部使用auto参数，处理泛型类型更方便。
+- 支持返回类型推导
+
+```c++
+auto add(int x,int y)//推导出来是int类型的返回值
+{
+    return x+y;
+}
+int main()
+{
+    int num1=1;
+    int num2=10;
+    int num3=add(num1,num2);
+    cout<<num3;
+    return 0;
+}
+```
 
 ### C++17
 
+#### C++17的新特性？
+
+- **结构化绑定**：元组/结构体成员绑定到变量
+
+```c++
+auto [x, y] = std::make_pair(1, 2);  // x=1, y=2
+```
+
+- **if初始化**：if/switch语句中直接初始化变量
+
+```c++
+if (int a = getValue(); a > 0) {
+    // 使用a
+}
+```
+
+- **折叠表达式**：简化可变参数模板
+
+```c++
+template<typename... Args>
+auto sum(Args... args) {
+    return (args + ...);  // 展开为 arg1 + arg2 + arg3...
+}
+```
+
+- **constexpr lambda**：编译时求值的lambda
+
+```c++
+constexpr auto add = [](int x, int y) { return x + y; };
+constexpr int result = add(3, 4);  // 编译时计算
+```
+
+- **std::optional**：安全表示可能无值的对象
+
+```c++
+std::optional<int> divide(int a, int b) {
+    if (b == 0) return std::nullopt;
+    return a / b;
+}
+
+if (auto result = divide(10, 2)) {
+    std::cout << *result;  // 5
+}
+```
+
+- **std::variant**：类型安全的联合体
+- **std::filesystem**：现代化文件系统API
+
 ## 模板与泛化
 
+#### C++中的特化和偏特化是什么？
+
+C++中的模板特化和偏特化是模板编程中用于针对特定类型或条件提供定制化实现的高级技术，旨在**优化性能、处理特殊逻辑或增强类型安全性**。
+
+- 模板特化(全特化)：为模板的所有参数指定具体类型，完全覆盖通用模板的实现。
+
+- 模板偏特化：仅对模板的部分参数进行特化，其余参数保持泛型。
+
+```c++
+/*模板全特化和偏特化的例子*/
+#include <iostream>
+using namespace std;
+
+// 主模板
+template <typename T>
+class Vector {
+private:
+    T* data;
+    size_t size;
+
+public:
+    Vector(size_t s) : size(s) {
+        data = new T[size];
+    }
+
+    ~Vector() {
+        delete[] data;
+    }
+
+    void info() {
+        cout << "通用Vector" << endl;
+    }
+};
+
+// 全特化：bool 类型
+template <>
+class Vector<bool> {
+private:
+    unsigned char* compressedData; // 使用位压缩存储 bool 数组
+
+public:
+    Vector(size_t size) {
+        compressedData = new unsigned char[(size + 7) / 8];
+    }
+
+    ~Vector() {
+        delete[] compressedData;
+    }
+
+    void info() {
+        cout << "特化BoolVector" << endl;
+    }
+};
+
+// 偏特化：所有指针类型的 Vector<T*>
+template <typename T>
+class Vector<T*> {
+private:
+    T** data;
+    size_t size;
+
+public:
+    Vector(size_t s) : size(s) {
+        data = new T*[size];
+    }
+
+    ~Vector() {
+        delete[] data;
+    }
+
+    void info() {
+        cout << "偏特化PointerVector" << endl;
+    }
+};
+
+int main() {
+    Vector<int> v1(10);       // 调用主模板
+    v1.info();                // 输出: 通用Vector
+
+    Vector<bool> v2(10);      // 调用全特化
+    v2.info();                // 输出: 特化BoolVector
+
+    Vector<int*> v3(10);      // 调用偏特化
+    v3.info();                // 输出: 偏特化PointerVector
+
+    return 0;
+}
+```
+
+#### SFINAE是什么？
+
+SFINAE（Substitution Failure Is Not An Error）：模板参数替换失败时，编译器不报错，而是忽略该模板候选，尝试其他重载。
+
+**应用场景**：
+
+**1. 条件启用模板**
+
+```c++
+template <typename T>
+typename std::enable_if<std::is_integral<T>::value, void>::type
+process(T val) { /* 处理整型 */ }
+
+template <typename T>
+typename std::enable_if<std::is_floating_point<T>::value, void>::type
+process(T val) { /* 处理浮点型 */ }
+```
+
+**2. 检测类型成员**
+
+```c++
+template <typename, typename = void>
+struct has_serialize : std::false_type {};
+
+template <typename T>
+struct has_serialize<T, std::void_t<decltype(std::declval<T>().serialize())>> 
+    : std::true_type {};
+```
+
+**3. 重载决策**
+
+```c++
+void process(double val);  // 普通函数优先
+template <typename T>
+void process(T val);       // 模板备选
+```
+
 ## STL容器
+
+#### C++的栈容器的内部是什么样的，内存是否连续？
+
+C++的栈stack不是独立容器，是基于其他序列容器的适配器。默认使用deque实现。
+
+**底层容器内存特性**：
+
+- deque：分段连续，由多个固定大小内存块组成，通过中控器管理，逻辑连续但物理不连续
+
+- vector：完全连续，单一大块内存
+
+- list：非连续，双向链表节点分散存储
+
+#### vector与普通数组的区别？vector扩容如何影响复杂度？
+
+**主要区别**：
+
+| 特性         | vector                         | 数组                 |
+| ------------ | ------------------------------ | -------------------- |
+| **大小**     | 动态，可自动扩容               | 静态，编译时确定     |
+| **内存管理** | 自动管理堆内存                 | 栈上分配或手动管理堆 |
+| **边界检查** | `at()`有边界检查               | 无边界检查           |
+| **功能接口** | 丰富（push_back/size/clear等） | 仅基础操作           |
+| **传递方式** | 值语义，可拷贝/移动            | 退化为指针           |
+
+**vector扩容机制与复杂度影响**：
+
+**1. 扩容过程**：
+
+- 容量不足时，分配更大内存（通常是1.5倍或2倍）
+- 将原有元素**移动或拷贝**到新内存
+- 释放旧内存
+
+**2. 复杂度分析**：
+
+```c++
+vector<int> vec;
+for (int i = 0; i < n; ++i) {
+    vec.push_back(i);  // 平摊O(1)，最坏O(n)
+}
+```
+
+- **单次push_back**：
+  - 无需扩容：O(1)
+  - 需要扩容：O(n)（拷贝n个元素）
+
+- **摘销分析**：虽然单次扩容是O(n)，但因为扩容频率低（每次增加2倍），平摊O(1)
+
+**3. 性能优化建议**：
+
+```c++
+// 预先分配空间，避免多次扩容
+vec.reserve(1000);  // 预留容量
+
+// 或直接指定初始大小
+vector<int> vec(1000);  // 初始化1000个元素
+```
+
+**4. 频繁扩容的影响**：
+
+- 内存分配/释放开销
+- 元素拷贝/移动开销
+- 迭代器失效（扩容后所有迭代器、指针、引用均失效）
+
+#### vector的reserve和resize的区别是什么?
+
+vector 的 resize 和 reserve 是两个用于管理容器大小和内存分配的成员函数。它们的区别如下：
+
+- reserve:预留至少 n 个元素的内存空间，但**不创建任何元素**。如果不存在扩容的情况，内存不变化。目的就是为了提前开辟内存空间**提高性能**，避免内存碎片。
+- resize：直接改变元素数量，**可能增删元素**。不存在重分配内存的情况。更改容器的大小并调整元素数量，会分配/释放内存和复制/删除元素。
+
+#### deque和vector的区别？内存布局有啥区别？
+
+deque的分段存储:
+
+- 由多个固定大小内存块（通常512字节）组成
+- 中控器（指针数组）管理这些块
+- 每个块内部连续，块之间不连续
+
+vector的连续存储：
+
+- 所有元素在一块连续内存中
+
+- 支持直接传递首地址给C API
+
+**适用场景**：
+
+**deque**：
+
+- 需要高频头尾操作（队列/双端队列）
+- 不需要内存严格连续
+- 避免频繁扩容的拷贝开销
+
+**vector**：
+
+- 只在尾部操作
+- 需要与C API交互（传递首地址）
+- 需要最优随机访问性能
+- 内存局部性要求高
+
+#### deque,list,set,multiset,map的对比?
+
+- deque:双向队列实现，存储空间连续，支持随机访问，性能比vector低。适合头尾部频繁操作且需要随机访问的场景。
+- list:由双向链表实现，存储空间不连续，只能通过迭代器访问，插入删除效率高，但是每个位置都需要分配额外空间存储前驱元素和后继元素。适用于在**任意位置频繁插入/删除**的场景。
+- set:红黑树实现，存储空间不连续，只能通过迭代器访问，适用于有序集合且**元素不重复**的场景。
+- multiset:红黑树实现，存储空间不连续，只能通过迭代器访问，默认使用less仿函数进行排序，也可以自定义，适用于有序集合且**元素重复**的场景。
+- map:由**红黑树**实现,红黑树是一种平衡二叉搜索树,存储空间**不连续**; 存储的元素是键值对元素。只能通过迭代器进行访问。默认使用less仿函数进行排序，map映射容器不允许重复的键。
+
+#### emplace_back和push_back的区别？
+
+**底层机制对比**：
+
+- push_back：先构造临时对象 → 拷贝/移动到容器 → 销毁临时对象
+- emplace_back：直接在容器内存中原地构造，无中间临时对象
+
+**适用场景**：
+
+使用emplace_back：
+
+- 构造复杂对象（多个参数）
+- 性能关键场景
+- 确保参数类型安全
+
+使用push_back：
+
+- 已有对象实例
+- 需要初始化列表：`vec.push_back({1, 2, 3})`
+- 代码可读性更重要
+
+#### C++空的class，会主动提供哪些函数？
+
+C++创建了一个空的class，会在特定的情况下提供一些函数。
+
+- 缺省构造函数：声明无参对象时会提供。
+- 缺省拷贝构造函数：对象拷贝初始化时候会触发
+- 缺省析构函数：对象声明周期结束时会触发
+- 缺省赋值运算符：对象复制操作时会触发
+- 移动构造函数：对象通过右值初始化触发(C++11)
+- 移动赋值运算符：对象通过右值赋值触发(C++11)
 
 ## 多线程与并发
 
@@ -302,4 +814,142 @@ Tips: `auto_ptr` 已在 C++11 中废弃, C++17 中移除。
 - `std::shared_mutex`        : 读写锁,支持多读单写,适合读多写少场景。
 - `std::shared_timed_mutex`  : 在 `shared_mutex` 基础上增加超时功能。
 
+#### 进程同步的技术有哪些？
+
+**1. 互斥锁**：同一时刻只有一个进程访问临界区
+
+```c++
+std::mutex mtx;
+std::lock_guard<std::mutex> lock(mtx);  // RAII自动加锁/解锁
+```
+
+**2. 信号量**：计数器控制多进程访问权限
+
+```c++
+std::counting_semaphore<10> sem(3);  // 允许3个并发
+sem.acquire();  // 获取
+sem.release();  // 释放
+```
+
+**3. 条件变量**：等待特定条件成立
+
+```c++
+std::condition_variable cv;
+cv.wait(lock, []{ return data_ready; });  // 等待
+cv.notify_one();  // 唤醒
+```
+
+**4. 屏障**：多进程同步点等待
+
+```c++
+std::barrier sync_point(5);  // 等5个进程
+sync_point.arrive_and_wait();  // 同步
+```
+
+**5. 原子操作**：不可分割的变量操作
+
+```c++
+std::atomic<int> counter(0);
+counter.fetch_add(1, std::memory_order_relaxed);
+```
+
+**6. 读写锁**：多读单写
+
+```c++
+std::shared_mutex rw_mutex;
+std::shared_lock lock(rw_mutex);  // 读锁（并发）
+std::unique_lock lock(rw_mutex);  // 写锁（独占）
+```
+
+#### C++中的原子变量？
+
+原子变量（`std::atomic`）是C++11引入的无锁线程安全工具，保证操作不可分割，避免数据竞争。
+
+**核心特性**：
+
+- **原子性**：操作要么未开始，要么已完成，无中间状态
+- **内存序**：控制编译器/CPU乱序执行，保证可见性
+
+**基本用法**：
+
+```c++
+#include <atomic>
+#include <thread>
+
+std::atomic<int> counter(0);
+
+void increment() {
+    for (int i = 0; i < 1000; ++i) {
+        counter.fetch_add(1);  // 原子自增
+    }
+}
+
+int main() {
+    std::thread t1(increment);
+    std::thread t2(increment);
+    t1.join();
+    t2.join();
+    std::cout << counter.load() << std::endl;  // 2000
+}
+```
+
+**内存序参数**：
+
+| 内存序                 | 使用场景                         |
+| ---------------------- | -------------------------------- |
+| `memory_order_relaxed` | 无同步要求，仅保证原子性         |
+| `memory_order_acquire` | 读操作，后续读写不可重排到此之前 |
+| `memory_order_release` | 写操作，之前读写不可重排到此之后 |
+| `memory_order_seq_cst` | 顺序一致（默认），最强同步       |
+
+**底层实现**：
+
+- **x86**：`lock` 前缀指令（`lock add`），锁定总线/缓存行
+- **ARM**：LL/SC指令对（`LDREX`/`STREX`），加载链接/存储条件
+
+**适用场景**：
+
+- 计数器、标志位
+- 无锁队列/栈
+- 双检锁定单例
+
+**注意**：复杂场景（多变量同步）仍需互斥锁。
+
+#### 协程是什么？
+
+C++协程（Coroutine）是C++20引入的一种轻量级并发编程机制，它允许函数在执行过程中暂停（挂起）并在稍后恢复，而无需依赖操作系统线程调度，从而简化异步编程、提高资源利用率。
+
+协程是一种特殊函数，可在执行中主动挂起，保存当前状态（局部变量、执行位置等），后续通过协程句柄恢复执行。
+C++20采用**无栈协程模型**，挂起时将上下文（局部变量、寄存器状态）存储在堆上
+
 ## 编译与链接
+
+#### 介绍一下RVO？
+
+RVO（Return Value Optimization）是编译器优化技术，在返回对象时直接在调用者的内存位置构造，消除拷贝/移动操作。
+
+RVO分为两种形式：
+
+**1. 纯RVO**
+
+返回无名临时对象。
+
+```c++
+MyClass createObject() {
+    return MyClass();  // 直接返回临时对象，触发RVO
+}
+```
+
+**2. NRVO**
+
+返回具名局部对象。
+
+```c++
+MyClass createObject() {
+    MyClass obj;  // 局部对象
+    // ... 一些操作
+    return obj;  // 返回具名对象，可能NRVO
+}
+```
+
+### 内存布局与对齐
